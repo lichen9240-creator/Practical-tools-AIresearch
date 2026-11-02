@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 本工具的本地状态（Token / 配置 / 意图日志）绝不能进版本库
+.autodl-autoconnect/
+config.json
+token
+journal.jsonl
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store

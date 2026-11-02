@@ -1,0 +1,53 @@
+{
+  "_说明": "把这份文件复制到 ~/.autodl-autoconnect/config.json 即可。命令行参数会覆盖这里的值。",
+
+  "gpu_models": ["RTX 4090"],
+  "_gpu_models": "要等的型号。写 '4090' 这种简写也能匹配到 'RTX 4090D'。",
+  "gpu_model_regex": "",
+  "_gpu_model_regex": "高级用法：正则匹配型号，例如 'RTX 40(90|90D)$'。填了就忽略 gpu_models。",
+  "gpu_count": 1,
+  "_gpu_count": "需要几张卡。",
+
+  "regions": ["西北B区", "北京B区"],
+  "_regions": "要盯的地区。官方代码（westDC2）或中文名（西北B区）都行；留空表示全国。",
+
+  "image_uuid": "",
+  "_image_uuid": "官方镜像 uuid。建议显式指定：留空时 AutoDL 多半会拒绝创建实例。",
+
+  "max_price_hourly": 3.0,
+  "_max_price_hourly": "单卡每小时价格上限（元）。超了不抢。设了之后拿不到价格的机器会被跳过。",
+  "max_total_cost": 20.0,
+  "_max_total_cost": "本次预计总花费上限（元）= 单价 × 卡数 × expected_hours。",
+  "expected_hours": 4.0,
+  "_expected_hours": "预计使用时长（小时）。",
+  "balance_reserve": 5.0,
+  "_balance_reserve": "余额保留额（元）。预检时余额必须高于「预计花费 + 保留额」。",
+  "include_vouchers": true,
+  "_include_vouchers": "预检时是否把代金券算进可用余额。",
+  "require_known_price": true,
+  "_require_known_price": "拿不到价格时是否放弃下单。true 更安全。",
+
+  "paid_consent": false,
+  "_paid_consent": "★ 默认 false = 只通知不下单。改成 true 才允许真实下单（扣费）。命令行还要再加 --yes。",
+  "poll_seconds": 3.0,
+  "_poll_seconds": "轮询间隔（秒）。",
+  "timeout_minutes": 1440.0,
+  "_timeout_minutes": "最长监测时长（分钟），0 表示不限。",
+  "cooldown_seconds": 20.0,
+  "_cooldown_seconds": "下单失败后的冷却时间。",
+  "max_attempts": 0,
+  "_max_attempts": "最多尝试下单次数，0 表示不限。",
+
+  "notify": {
+    "webhook_url": "",
+    "_webhook_url": "通用 Webhook 地址，POST 一个 JSON。",
+    "webhook_token": "",
+    "_webhook_token": "Webhook 的 Bearer Token（可选）。",
+    "serverchan_key": "",
+    "_serverchan_key": "Server酱 key，把消息推到微信。",
+    "autodl_wechat_token": "",
+    "_autodl_wechat_token": "AutoDL 微信消息 token（控制台 → 设置 → 微信消息）。",
+    "desktop": true,
+    "_desktop": "在本机终端打印醒目提示（Windows 下额外响一声）。"
+  }
+}

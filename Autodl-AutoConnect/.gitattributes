@@ -1,0 +1,10 @@
+# 统一用 LF 存进仓库，避免跨平台差异。
+* text=auto eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf

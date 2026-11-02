@@ -1,0 +1,8 @@
+# Autodl-AutoConnect 运行时零依赖，只用 Python 标准库。
+# 本文件仅用于告诉使用者「不需要 pip install 任何东西」。
+#
+# 想装成命令行工具时：
+#     pip install -e .
+#
+# 想要命令行入口而不装包：
+#     python -m autodl_autoconnect
