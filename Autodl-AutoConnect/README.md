@@ -253,20 +253,22 @@ Windows 用 DPAPI 加密；服务端只回显必要字段。
 | Server酱（推微信） | `notify.serverchan_key` |
 | AutoDL 微信消息 | `notify.autodl_wechat_token`（AutoDL 控制台 → 设置 → 微信消息） |
 
-Webhook 的请求体：
+Webhook 的请求体（本项目自定义的格式）：
 
 ```json
 {
-  "id": "autodl-1793607760000",
-  "event": "order_created",
-  "title": "AutoDL 抢卡成功",
-  "name": "Autodl-AutoConnect",
-  "content": "实例 inst-xxxx\n机器 b7f3c9a2\n卡数 1\n单价 2.5 元/时",
-  "timestamp": "2026-11-02T16:29:20+08:00"
+  "source": "autodl-autoconnect",
+  "kind": "order_created",
+  "headline": "AutoDL 抢卡成功",
+  "label": "Autodl-AutoConnect",
+  "message": "实例 inst-xxxx\n机器 b7f3c9a2\n卡数 1\n单价 2.5 元/时",
+  "sent_at": "2026-11-02T162920+0800"
 }
 ```
 
-`event` 取值：`stock_found`（有货）、`order_created`（抢到）、
+请求头带 `X-Event-Id`（幂等去重用），可选用 `Authorization: Bearer <webhook_token>`。
+
+`kind` 取值：`stock_found`（有货）、`order_created`（抢到）、
 `balance_low`（余额不足）、`ambiguous`（结果不明）。
 
 ---
@@ -317,12 +319,46 @@ OK
 
 ---
 
+## 与参考项目的关系（说清楚，免得误会）
+
+同赛道里已经有一个做得不错的开源项目：
+[Stop-Manually-Refreshing-AutoDL-GPU](https://github.com/cc2025cheng/Stop-Manually-Refreshing-AutoDL-GPU)（MIT，作者 cc2025cheng）。
+本项目**借鉴了它的问题定义与产品思路**（等卡、护栏、意图日志、通知），
+但**没有使用它的任何代码**，实现路径也完全不同。对照如下：
+
+| 维度 | 参考项目 | 本项目 |
+| --- | --- | --- |
+| 技术栈 | Node.js 22 + Playwright + 本地 Web 控制台 | Python 3.9+ **零运行时依赖**（纯标准库） |
+| 登录方式 | 专用浏览器人工登录，复用 Cookie | **开发者 Token 直接鉴权**，不要浏览器/账号密码/验证码 |
+| 驱动方式 | 驱动 DOM 点击（选择器易碎、慢） | 直接调 JSON 接口（结构化、可编程） |
+| 交付形态 | 图形控制台，给人用 | **CLI + `--json`**，给人和 Agent 用 |
+| 部署要求 | 需要图形环境 | 容器 / 小机器 / CI / 无头服务器都行 |
+| 抢卡动作 | 人工点「创建并开机」 | `grab` 原子命令，一次调用完成查+下+开+核对 |
+| 结果不明 | 记意图 → 对账 → 停下（思路借鉴） | 同思路，但实现独立：JSONL 日志 + **跨进程**拦截 + 幂等（按 machine_id 去重） |
+| Token 存储 | Windows 加密 | Windows **DPAPI**；其它平台 base64+0600 或环境变量 |
+| 克隆换卡 | 有（驱动页面） | 未实现（端点已定位，见下） |
+| AI 选卡 | 有（读 README/requirements 推算型号） | 未实现 |
+| 官方库存接口 | 未用 | 额外支持 `dev/machine/region/gpu_stock` |
+| 测试 | 334 项，Playwright + 合成数据 | 69 项，**本地假 AutoDL 服务跑真实 HTTP 往返** + 离线演示脚本 |
+
+一句话：**想法撞车，代码没抄。** 本项目连名字都不一样（它叫「候机室」，这里叫 AutoConnect），
+Webhook 报文格式、配置格式、日志格式、退出码语义全是本项目自己定的。
+
+> 顺带一提：正因为读它的源码，我才知道 `api.autodl.com/api/v1/dev/wallet/balance` 这个官方接口
+> 和「开发者 Token 就是控制台 Token」这条关键线索——这属于**接口事实**，不是可版权的表达。
+
+### 还没做的功能
+
+- **同地区克隆换卡**（把已关机实例迁到另一张空闲卡）：端点已定位
+  `POST /api/v1/order/instance/clone/payg`、`GET /api/v1/instance/clone/get_clone_code`，
+  还没实现。
+- **AI 选卡**（贴项目 README 推算能跑的型号）。
+
 ## 致谢
 
-参考并借鉴了 [Stop-Manually-Refreshing-AutoDL-GPU](https://github.com/cc2025cheng/Stop-Manually-Refreshing-AutoDL-GPU)
-的产品思路（安全护栏、意图日志、克隆换卡、微信通知）。
-本项目的差异是**绕开浏览器，直接走接口**，因此可以跑在无图形界面的机器上，
-也更容易被 Agent 接管。
+- [Stop-Manually-Refreshing-AutoDL-GPU](https://github.com/cc2025cheng/Stop-Manually-Refreshing-AutoDL-GPU) —— 同一个问题的开源解答，本项目的产品思路受其启发。
+- [AutoDL 官方文档](https://www.autodl.com/docs/common_api/) —— 开发者 API 与地区代码表。
+- 本项目与 AutoDL 官方无隶属关系。
 
 ## 许可证
 

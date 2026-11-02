@@ -100,8 +100,8 @@ class GrabTest(WatcherTestBase):
         # 开机也被调用了
         self.assertEqual(len(self.fake.state.power_on_calls), 1)
         # 通知也发出去了
-        titles = [w["body"].get("title") for w in self.webhooks]
-        self.assertIn("AutoDL 抢卡成功", titles)
+        headlines = [w["body"].get("headline") for w in self.webhooks]
+        self.assertIn("AutoDL 抢卡成功", headlines)
 
     def test_journal_records_intent_and_result(self):
         self.fake.add_machine(machine_id="m-1")

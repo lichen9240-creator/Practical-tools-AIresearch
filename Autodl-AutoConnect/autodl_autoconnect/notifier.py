@@ -100,15 +100,18 @@ class Notifier:
             pass
 
     def _send_webhook(self, title: str, content: str, *, event: str, name: str) -> DeliveryResult:
+        # 本工具自定义的 Webhook 报文格式（字段名由本项目自己定，
+        # 与任何其它同类工具无关；对接机器人时按这个格式写适配器即可）。
+        event_id = f"aac-{int(self._clock() * 1000)}"
         payload = {
-            "id": f"autodl-{int(self._clock() * 1000)}",
-            "event": event,
-            "title": title,
-            "name": name[:40],
-            "content": content[:2000],
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+            "source": "autodl-autoconnect",
+            "kind": event,
+            "headline": title,
+            "label": name[:40],
+            "message": content[:2000],
+            "sent_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
-        headers = {"Content-Type": "application/json", "Idempotency-Key": payload["id"]}
+        headers = {"Content-Type": "application/json", "X-Event-Id": event_id}
         if self.config.webhook_token:
             headers["Authorization"] = f"Bearer {self.config.webhook_token}"
         try:
