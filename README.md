@@ -1,5 +1,7 @@
 # Practical-tools-AIresearch
 
+[English](README.en.md) | **简体中文**
+
 做 AI 研究过程中攒下来的一些实用小工具。每个工具一个独立目录，
 互不依赖，可以单独 clone 出来用。
 
@@ -26,8 +28,10 @@ autodl-ac watch --gpu-models "RTX 4090" --regions 西北B区 --yes
 - **Agent 能接管**：每条命令都支持 `--json`，退出码有明确语义
 - **不会重复扣费**：意图日志 + 幂等对账 + 「结果不明绝不重试」
 - **花钱有护栏**：单价上限 / 总预算 / 余额预检，缺一不可
+- **快**：长连接复用（1.1.0 起每个请求省一次 TCP+TLS 握手），
+  下单前只留一个网络往返，轮询 2 秒一次
 
-详见 [Autodl-AutoConnect/README.md](Autodl-AutoConnect/README.md)。
+详见 [Autodl-AutoConnect/README.md](Autodl-AutoConnect/README.md)（[English](Autodl-AutoConnect/README.en.md)）。
 
 ---
 

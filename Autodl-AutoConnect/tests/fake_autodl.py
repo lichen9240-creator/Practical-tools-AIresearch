@@ -40,9 +40,16 @@ class FakeState:
         self.fail_next_create_with: Exception | None = None
         """设置后，下一次下单会抛出该异常（用来模拟超时/网络中断）。"""
 
+        self.fail_create_with_code: str | None = None
+        """设置后，下一次下单返回该业务错误码（确定性失败，不是结果不明）。"""
+
         self.create_calls: list[dict] = []
         self.power_on_calls: list[str] = []
         self.search_calls: list[dict] = []
+        self.connection_count = 0
+        """累计 TCP 连接数（HTTP/1.1 长连接下应远小于请求数）。"""
+        self.response_delay = 0.0
+        """每个响应的固定延迟（秒），用来模拟真实网络 RTT。"""
         self.lock = threading.Lock()
 
     def add_machine(self, **kwargs) -> dict:
@@ -65,6 +72,14 @@ class FakeState:
 class _Handler(BaseHTTPRequestHandler):
     state: FakeState = None  # type: ignore[assignment]
 
+    # HTTP/1.1 + Content-Length = 长连接；这样才能测出客户端有没有真的复用连接。
+    protocol_version = "HTTP/1.1"
+
+    def setup(self) -> None:
+        super().setup()
+        with self.state.lock:
+            self.state.connection_count += 1
+
     # 静默，避免测试输出被日志淹没
     def log_message(self, fmt, *args):  # noqa: A003
         return
@@ -82,6 +97,8 @@ class _Handler(BaseHTTPRequestHandler):
             return {}
 
     def _send(self, status: int, payload: Any) -> None:
+        if self.state.response_delay:
+            time.sleep(self.state.response_delay)
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -215,6 +232,11 @@ class _Handler(BaseHTTPRequestHandler):
             state.fail_next_create_with = None
             if failure is not None:
                 raise failure  # 模拟服务端在处理中途断开连接
+            error_code = state.fail_create_with_code
+            state.fail_create_with_code = None
+            if error_code:
+                self._fail(error_code, "模拟业务错误")
+                return
 
             machine_id = info.get("machine_id")
             machine = next((m for m in state.machines if m["machine_id"] == machine_id), None)
@@ -267,7 +289,9 @@ class FakeAutoDL:
         handler = type("BoundHandler", (_Handler,), {"state": self.state})
         self.server = _QuietServer((host, port), handler)
         self.server.daemon_threads = True
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
+        )
 
     @property
     def base_url(self) -> str:

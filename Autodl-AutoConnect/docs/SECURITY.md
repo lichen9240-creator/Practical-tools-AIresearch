@@ -105,16 +105,21 @@ autodl-ac journal
 
 ## 手动解除「结果不明」的拦截
 
-确认过 AutoDL 控制台、确认没有实例之后，删掉日志里那条 `intent` 记录即可：
+先在 AutoDL 控制台核对实例列表，然后：
 
 ```bash
-# 先看清楚
+# 1. 看清楚那条未收尾的记录
 autodl-ac journal
 
-# 编辑 ~/.autodl-autoconnect/journal.jsonl，删掉那行 kind=intent 的记录
+# 2. 确认过控制台之后，一条命令收尾（会给每条未收尾的 intent 补一条 result）
+autodl-ac journal --ack
 ```
 
-或者在确认成功之后，补一条 `result` 记录把它收尾：
+`--ack` 只写本地日志，不会去查接口、也不会下单；它表达的是「我人工核对过了」。
+
+如果更喜欢手工处理，也可以直接编辑
+`~/.autodl-autoconnect/journal.jsonl`：删掉那行 `kind=intent` 的记录，
+或者补一条 `result` 把它收尾：
 
 ```json
 {"ts": 1793607761.0, "kind": "result", "machine_id": "b7f3c9a2", "instance_uuid": "inst-xxxx", "status": "confirmed"}

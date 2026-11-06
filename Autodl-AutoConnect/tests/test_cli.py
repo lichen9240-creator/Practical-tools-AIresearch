@@ -12,10 +12,14 @@ from pathlib import Path
 from autodl_autoconnect.cli import (
     EXIT_AMBIGUOUS,
     EXIT_AUTH,
+    EXIT_BUSINESS,
+    EXIT_ERROR,
+    EXIT_NETWORK,
     EXIT_NO_MATCH,
     EXIT_OK,
     main,
 )
+from autodl_autoconnect.journal import Journal
 
 from .fake_autodl import FakeAutoDL
 
@@ -47,7 +51,13 @@ class CliTest(unittest.TestCase):
         self.fake.__exit__(None, None, None)
         self._dir.cleanup()
 
-    def run_cli(self, *args: str) -> tuple[int, str]:
+    def run_cli(
+        self,
+        *args: str,
+        token: str | None = None,
+        base_url: str | None = None,
+        global_args: tuple[str, ...] = (),
+    ) -> tuple[int, str]:
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             code = main(
@@ -55,10 +65,11 @@ class CliTest(unittest.TestCase):
                     "--config",
                     str(self.config),
                     "--token",
-                    self.fake.token,
+                    token if token is not None else self.fake.token,
                     "--base-url",
-                    self.fake.base_url,
+                    base_url or self.fake.base_url,
                     "--json",
+                    *global_args,
                     *args,
                     "--journal",
                     str(self.journal),
@@ -141,6 +152,42 @@ class CliTest(unittest.TestCase):
         # 只发了一次下单请求
         self.assertEqual(len(self.fake.state.create_calls), 1)
 
+    def test_grab_wrong_token_returns_auth_exit_code(self):
+        """鉴权失败必须是退出码 3，而不是笼统的 7。"""
+        self.fake.add_machine(machine_id="m-1")
+        code, out = self.run_cli("grab", "--yes", token="wrong-token")
+        self.assertEqual(code, EXIT_AUTH)
+        payload = json.loads(out)
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["error_code"], "AUTH_FAILED")
+
+    def test_grab_business_error_returns_exit_code_7(self):
+        self.fake.add_machine(machine_id="m-1")
+        self.fake.state.fail_create_with_code = "NoStock"
+        code, out = self.run_cli("grab", "--yes")
+        self.assertEqual(code, EXIT_BUSINESS)
+        self.assertEqual(json.loads(out)["error_code"], "NoStock")
+
+    def test_grab_network_error_returns_exit_code_6(self):
+        code, out = self.run_cli(
+            "grab",
+            "--yes",
+            base_url="http://127.0.0.1:1",
+            global_args=("--http-retries", "0", "--http-timeout", "2"),
+        )
+        self.assertEqual(code, EXIT_NETWORK)
+        payload = json.loads(out)
+        self.assertEqual(payload["error_code"], "NETWORK_ERROR")
+
+    def test_doctor_survives_api_failure(self):
+        """doctor 在接口报错时要能正常输出报告，而不是抛 NameError。"""
+        code, out = self.run_cli("doctor", token="wrong-token")
+        self.assertEqual(code, EXIT_ERROR)
+        payload = json.loads(out)
+        self.assertFalse(payload["ok"])
+        names = [check["name"] for check in payload["checks"]]
+        self.assertIn("余额接口", names)
+
     # ------------------------------------------------------------- 其它
 
     def test_journal_json(self):
@@ -156,6 +203,17 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, EXIT_OK)
         payload = json.loads(out)
         self.assertEqual(payload["config"]["gpu_models"], ["RTX 4090"])
+
+    def test_journal_ack_unblocks(self):
+        """人工核对后 `journal --ack` 应该把未收尾的 intent 收掉。"""
+        journal = Journal(self.journal)
+        journal.record("intent", machine_id="m-1", gpu_count=1, price_hourly=2.5)
+        self.assertEqual(len(journal.pending_intents()), 1)
+
+        code, out = self.run_cli("journal", "--ack")
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(json.loads(out)["acked"], 1)
+        self.assertEqual(journal.pending_intents(), [])
 
 
 if __name__ == "__main__":

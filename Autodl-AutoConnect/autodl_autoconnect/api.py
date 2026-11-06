@@ -192,6 +192,8 @@ class AutoDLClient:
         page_size: int = 90,
         charge_type: str = "payg",
         extra: Mapping[str, Any] | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
     ) -> list[MachineOffer]:
         """搜索可租机器报价。
 
@@ -210,14 +212,16 @@ class AutoDLClient:
             body.update(extra)
 
         data = self._call(
-            "POST", ENDPOINTS["machine_search"], where="搜索机器报价", json_body=body
+            "POST", ENDPOINTS["machine_search"], where="搜索机器报价", json_body=body,
+            timeout=timeout, max_retries=max_retries,
         )
         offers = machines_from_payload(data)
         if offers or _has_list_key(data):
             return offers
         # 结构对不上就换等价端点再试一次（``user/machine/list`` 返回同一种结构）。
         data = self._call(
-            "POST", ENDPOINTS["machine_list"], where="搜索机器报价(备用端点)", json_body=body
+            "POST", ENDPOINTS["machine_list"], where="搜索机器报价(备用端点)", json_body=body,
+            timeout=timeout, max_retries=max_retries,
         )
         return machines_from_payload(data)
 
@@ -291,7 +295,13 @@ class AutoDLClient:
         data = self._call(
             "POST", ENDPOINTS["create_payg"], where="创建实例", json_body=body, max_retries=0
         )
-        instance_uuid = data if isinstance(data, str) else (data or {}).get("uuid", "")
+        if isinstance(data, str):
+            instance_uuid = data
+        elif isinstance(data, dict):
+            # 控制台返回 {"uuid": ...}；个别版本用 instance_uuid / order_uuid。
+            instance_uuid = data.get("uuid") or data.get("instance_uuid") or ""
+        else:
+            instance_uuid = ""
         return OrderResult(
             instance_uuid=str(instance_uuid or ""),
             machine_id=machine_id,

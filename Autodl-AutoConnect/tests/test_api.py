@@ -20,6 +20,7 @@ class ApiTest(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        self.client.http.close()
         self.fake.__exit__(None, None, None)
 
     # ------------------------------------------------------------- 鉴权
@@ -28,8 +29,11 @@ class ApiTest(unittest.TestCase):
         bad = AutoDLClient(
             HttpClient("wrong", base_url=self.fake.base_url, timeout=5, max_retries=0)
         )
-        with self.assertRaises(AuthError):
-            bad.balance()
+        try:
+            with self.assertRaises(AuthError):
+                bad.balance()
+        finally:
+            bad.http.close()
 
     def test_business_error_code_raises_api_error(self):
         self.fake.state.token = "changed-after-client-created"
@@ -140,6 +144,40 @@ class ApiTest(unittest.TestCase):
         self.fake.add_instance(uuid="i-1")
         self.assertTrue(self.client.instance_exists("i-1"))
         self.assertFalse(self.client.instance_exists("i-999"))
+
+
+class KeepAliveTest(unittest.TestCase):
+    """长连接是抢卡速度的关键：5 个请求应该只握手 1 次。"""
+
+    def setUp(self) -> None:
+        self.fake = FakeAutoDL()
+        self.fake.__enter__()
+
+    def tearDown(self) -> None:
+        self.fake.__exit__(None, None, None)
+
+    def _client(self, **kwargs) -> AutoDLClient:
+        return AutoDLClient(
+            HttpClient(self.fake.token, base_url=self.fake.base_url, timeout=5, **kwargs)
+        )
+
+    def test_reuses_one_connection_for_many_requests(self):
+        client = self._client()
+        try:
+            for _ in range(5):
+                client.balance()
+        finally:
+            client.http.close()
+        self.assertEqual(self.fake.state.connection_count, 1)
+
+    def test_disabled_keepalive_opens_new_connections(self):
+        client = self._client(keepalive=False)
+        try:
+            for _ in range(3):
+                client.balance()
+        finally:
+            client.http.close()
+        self.assertGreaterEqual(self.fake.state.connection_count, 3)
 
 
 if __name__ == "__main__":

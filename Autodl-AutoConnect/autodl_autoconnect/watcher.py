@@ -15,26 +15,44 @@
 
 from __future__ import annotations
 
+import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
 from .api import AutoDLClient
 from .config import TaskSpec
-from .errors import APIError, AutoDLError, NetworkError
+from .errors import AuthError, AutoDLError, NetworkError
 from .journal import Journal
-from .matcher import MatchResult, match_offer, select_best
-from .models import Balance, MachineOffer, OrderResult
+from .matcher import match_offer, select_best
+from .models import Balance, Instance, MachineOffer, OrderResult
 from .notifier import Notifier
 
 __all__ = ["Watcher", "WatchOutcome"]
 
-#: 下单后轮询「实例是否已出现」的次数与间隔。
-CONFIRM_ATTEMPTS = 6
-CONFIRM_INTERVAL = 2.0
+
+def _error_code(exc: AutoDLError) -> str:
+    """把异常归一化成 CLI 认识的错误码（鉴权 / 网络 / 业务）。"""
+    if isinstance(exc, AuthError):
+        return AuthError.code
+    if isinstance(exc, NetworkError):
+        return NetworkError.code
+    return exc.code
+
+
+#: 下单后「实例是否已出现」的重试节奏（秒）。旧版是 6 次 × 2 秒，
+#: 每次 grab 最坏要 12 秒才返回；现在最坏约 1 秒。
+CONFIRM_BACKOFF = (0.0, 0.35, 0.9)
 
 #: 余额快照的复用时长（秒）。
 BALANCE_TTL = 30.0
+
+#: 同一条通知的去重窗口（秒），避免「余额不足」之类每轮刷屏。
+NOTIFY_DEDUPE_SECONDS = 300.0
+
+#: ``--json`` 里最多带多少条候选，避免 90 条报价把输出撑爆。
+MAX_CANDIDATES = 20
 
 
 @dataclass
@@ -48,12 +66,18 @@ class WatchOutcome:
     """``no_match`` / ``observed`` / ``created`` / ``confirmed`` / ``ambiguous`` / ``error``。"""
 
     message: str = ""
+    error_code: str = ""
+    """``status == "error"`` 时的错误码，CLI 用它映射退出码（如 NETWORK_ERROR -> 6）。"""
+
+    phase: str = ""
+    """错误发生在哪个阶段：``search`` / ``balance`` / ``order``。"""
+
     candidates: list[dict] = field(default_factory=list)
     balance: dict | None = None
     attempts: int = 0
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "ok": self.status not in ("error", "ambiguous"),
             "matched": self.matched,
             "ordered": self.ordered,
@@ -64,6 +88,9 @@ class WatchOutcome:
             "attempts": self.attempts,
             "order": self.order.to_dict() if self.order else None,
         }
+        if self.error_code:
+            data["error_code"] = self.error_code
+        return data
 
 
 class Watcher:
@@ -79,6 +106,7 @@ class Watcher:
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
         logger: Callable[[str], None] | None = None,
+        rng: random.Random | None = None,
     ):
         self.client = client
         self.spec = spec
@@ -87,9 +115,28 @@ class Watcher:
         self._clock = clock
         self._sleep = sleep
         self._log = logger or (lambda text: print(text, flush=True))
+        self._rng = rng or random.Random()
         self._balance_cache: tuple[float, Balance] | None = None
+        self._notified_at: dict[str, float] = {}
+        self._pool: ThreadPoolExecutor | None = None
         self._attempts = 0
         self._blocked_reason = ""
+
+    def close(self) -> None:
+        """收工：停掉线程池（长连接由 HttpClient.close() 统一关闭）。"""
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.shutdown(wait=True)
+
+    def _executor(self) -> ThreadPoolExecutor:
+        """下单前并行做只读检查用的线程池。
+
+        复用同一个池（而不是每单新建），这样工作线程上的长连接也能一直复用，
+        每下一单只多一次握手。
+        """
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="autodl-ac")
+        return self._pool
 
     # ------------------------------------------------------------------ 余额
 
@@ -149,12 +196,16 @@ class Watcher:
             return outcome
 
         try:
+            # 轮询请求重试一次就够：卡只活几十秒，重试太多次等于这轮直接放弃。
             offers = self.client.search_machines(
                 regions=self.spec.normalized_regions(),
                 page_size=max(50, min(200, self.spec.gpu_count * 20 + 50)),
+                max_retries=1,
             )
         except AutoDLError as exc:
             outcome.status = "error"
+            outcome.phase = "search"
+            outcome.error_code = _error_code(exc)
             outcome.message = f"查询库存失败：{exc}"
             return outcome
 
@@ -171,7 +222,7 @@ class Watcher:
             }
             for r in results
             if r.offer is not None
-        ]
+        ][:MAX_CANDIDATES]
         best = select_best(results, self.spec)
         if best is None:
             outcome.status = "no_match"
@@ -191,6 +242,7 @@ class Watcher:
                 f"{best.reason}\n机器 {offer.machine_id}\n"
                 f"如需自动下单，请把配置里的 paid_consent 设为 true。",
                 event="stock_found",
+                key=offer.machine_id,
             )
             return outcome
 
@@ -198,16 +250,32 @@ class Watcher:
 
     def _place_order(self, offer: MachineOffer, outcome: WatchOutcome) -> WatchOutcome:
         """执行下单，并在任何情况下都留下可核对的日志。"""
-        ok, why = self._check_balance(offer)
+        outcome.phase = "order"
+
+        # 查余额 / 查重都是只读请求，彼此独立，并发发出去省一个往返。
+        pool = self._executor()
+        balance_future = pool.submit(self._check_balance, offer)
+        existing_future = pool.submit(self._find_instance_on_machine, offer.machine_id)
+        try:
+            ok, why = balance_future.result()
+        except AutoDLError as exc:
+            outcome.status = "error"
+            outcome.phase = "balance"
+            outcome.error_code = _error_code(exc)
+            outcome.message = f"余额预检失败：{exc}"
+            return outcome
+        existing = existing_future.result()
+
         if not ok:
             outcome.status = "error"
+            outcome.phase = "balance"
+            outcome.error_code = "BALANCE_INSUFFICIENT"
             outcome.message = why
             self.journal.record("skipped", machine_id=offer.machine_id, status="balance", message=why)
-            self._notify_once("AutoDL 余额不足", why, event="balance_low")
+            self._notify_once("AutoDL 余额不足", why, event="balance_low", key="balance")
             return outcome
 
         # 幂等：如果这台机器上已经有我方的实例，就不要再下第二单。
-        existing = self._find_existing_instance(offer.machine_id)
         if existing is not None:
             outcome.status = "observed"
             outcome.message = f"机器 {offer.machine_id} 上已有实例 {existing.uuid}，跳过重复下单"
@@ -224,6 +292,7 @@ class Watcher:
         outcome.attempts = self._attempts
         if self.spec.max_attempts and self._attempts > self.spec.max_attempts:
             outcome.status = "error"
+            outcome.error_code = "MAX_ATTEMPTS"
             outcome.message = f"已达到最大下单次数 {self.spec.max_attempts}"
             return outcome
 
@@ -258,7 +327,7 @@ class Watcher:
                 status="network_error",
                 message=str(exc),
             )
-            recovered = self._reconcile(offer.machine_id)
+            recovered = self._find_instance_on_machine(offer.machine_id)
             if recovered is not None:
                 outcome.status = "confirmed"
                 outcome.ordered = True
@@ -283,9 +352,12 @@ class Watcher:
             )
             outcome.status = "ambiguous"
             outcome.message = self._blocked_reason
-            self._notify_once("AutoDL 下单结果不明", self._blocked_reason, event="ambiguous")
+            self._notify_once(
+                "AutoDL 下单结果不明", self._blocked_reason, event="ambiguous", key=offer.machine_id
+            )
             return outcome
-        except APIError as exc:
+        except AutoDLError as exc:
+            # 业务错误（含鉴权失败）是「确定没下成」：写结果收尾，避免被当成结果不明。
             self.journal.record(
                 "result",
                 machine_id=offer.machine_id,
@@ -296,6 +368,7 @@ class Watcher:
                 message=str(exc),
             )
             outcome.status = "error"
+            outcome.error_code = _error_code(exc)
             outcome.message = f"下单失败：{exc}"
             return outcome
 
@@ -344,19 +417,8 @@ class Watcher:
 
     # ------------------------------------------------------------------ 对账
 
-    def _find_existing_instance(self, machine_id: str):
-        """在实例列表里找这台机器上已有的实例（幂等保护）。"""
-        try:
-            instances = self.client.list_instances()
-        except AutoDLError:
-            return None
-        for instance in instances:
-            if instance.machine_id and instance.machine_id == machine_id:
-                return instance
-        return None
-
-    def _reconcile(self, machine_id: str):
-        """只读对账：看这台机器上是否已经出现了实例。"""
+    def _find_instance_on_machine(self, machine_id: str) -> Instance | None:
+        """在这台机器上找已有实例（幂等保护 + 结果不明时的只读对账）。"""
         try:
             instances = self.client.list_instances()
         except AutoDLError:
@@ -367,18 +429,22 @@ class Watcher:
         return None
 
     def _confirm(self, instance_uuid: str, machine_id: str) -> bool:
-        """确认实例真的建出来了。"""
+        """确认实例真的建出来了。
+
+        服务端已经返回 uuid 说明下单被受理；这里只做很轻的核对，
+        核对不上再用实例列表兜底，**绝不在这里长时间阻塞**。
+        """
         if not instance_uuid:
-            return False
-        for attempt in range(CONFIRM_ATTEMPTS):
+            return self._find_instance_on_machine(machine_id) is not None
+        for delay in CONFIRM_BACKOFF:
+            if delay:
+                self._sleep(delay)
             try:
                 if self.client.instance_exists(instance_uuid):
                     return True
             except AutoDLError:
                 pass
-            if attempt < CONFIRM_ATTEMPTS - 1:
-                self._sleep(CONFIRM_INTERVAL)
-        return self._reconcile(machine_id) is not None
+        return self._find_instance_on_machine(machine_id) is not None
 
     def _detect_block(self) -> str:
         """检查日志里有没有「结果不明」的旧记录，有就阻止继续下单。"""
@@ -389,12 +455,18 @@ class Watcher:
         return (
             f"日志中存在未收尾的下单记录（{last.get('time')} 机器 {last.get('machine_id')}），"
             "为避免重复扣费已停止下单。请先到 AutoDL 控制台核对实例列表，"
-            "确认后在日志里补一条 result 记录，或删除该条 intent 记录后再运行。"
+            "确认后用 `autodl-ac journal --ack` 收尾，或删除该条 intent 记录后再运行。"
         )
 
     # ------------------------------------------------------------------ 通知
 
-    def _notify_once(self, title: str, content: str, *, event: str) -> None:
+    def _notify_once(self, title: str, content: str, *, event: str, key: str = "") -> None:
+        """同一类通知在去重窗口内只发一次，避免 watch 模式下刷屏。"""
+        marker = f"{event}|{key or content[:80]}"
+        now = self._clock()
+        if now - self._notified_at.get(marker, float("-inf")) < NOTIFY_DEDUPE_SECONDS:
+            return
+        self._notified_at[marker] = now
         try:
             self.notifier.send(title, content, event=event, name="Autodl-AutoConnect")
         except Exception as exc:  # noqa: BLE001 - 通知失败不能影响抢卡
@@ -409,9 +481,22 @@ class Watcher:
             f"单价 {order.price_hourly if order else ''} 元/时\n"
             f"{outcome.message}"
         )
-        self._notify_once("AutoDL 抢卡成功", content, event="order_created")
+        self._notify_once(
+            "AutoDL 抢卡成功",
+            content,
+            event="order_created",
+            key=(order.instance_uuid if order else ""),
+        )
 
     # ------------------------------------------------------------------ 循环
+
+    def _next_delay(self, last: WatchOutcome) -> float:
+        """下一轮之间的等待时间：下单失败冷却 + ±15% 抖动。"""
+        delay = self.spec.poll_seconds
+        if last.status == "error" and last.phase == "order":
+            delay = max(delay, self.spec.cooldown_seconds)
+        jitter = 1.0 + self._rng.uniform(-0.15, 0.15)
+        return max(0.05, delay * jitter)
 
     def run(self, *, once: bool = False, max_iterations: int | None = None) -> WatchOutcome:
         """主循环。``once=True`` 只跑一轮。"""
@@ -434,13 +519,17 @@ class Watcher:
                     return last
             if once:
                 return last
+            if last.status == "error" and last.error_code == "MAX_ATTEMPTS":
+                # 下单次数已经用尽，继续轮询只会每次都撞同一个错，直接收工。
+                return last
             if max_iterations is not None and iteration >= max_iterations:
                 return last
             if deadline is not None and self._clock() >= deadline:
-                last.status = last.status if last.status != "no_match" else "timeout"
-                last.message = last.message or "监测超时结束"
+                if last.status == "no_match":
+                    last.status = "timeout"
+                    last.message = last.message or "监测超时结束"
                 return last
-            self._sleep(self.spec.poll_seconds)
+            self._sleep(self._next_delay(last))
 
 
 def best_offer_summary(offer: MachineOffer) -> str:

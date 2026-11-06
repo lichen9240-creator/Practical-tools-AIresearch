@@ -27,18 +27,17 @@ import argparse
 import json
 import sys
 import time
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 from . import __version__
 from .api import AutoDLClient
 from .config import ENV_CONFIG, TaskSpec, default_config_path, load_config, save_config
-from .errors import APIError, AuthError, ConfigError, NetworkError, redact
+from .errors import APIError, AuthError, AutoDLError, ConfigError, NetworkError, redact
 from .httpclient import HttpClient
 from .journal import Journal
-from .matcher import match_offer
-from .notifier import Notifier
-from .secret import load_token, save_token, token_path
-from .watcher import Watcher
+from .secret import describe_storage, load_token, save_token, token_path
+from .watcher import Watcher, WatchOutcome
 
 __all__ = ["main", "build_parser"]
 
@@ -61,13 +60,11 @@ EXIT_CODES = {
     EXIT_BUSINESS: "接口业务错误",
 }
 
-BANNER = r"""
-  ___         _____             _        _____          _
- / _ \ | | / /_  __/ _ __  ___ | |_ ___ |_   _| |_ ___  | |_
-| |_| || | \ \ \/ // _` |/ _ \| __/ _ \ | | | | __/ _ \ | __|
-|  _  || |  \ V /| (_| | (_) | ||  __/ | | | | ||  __/ | |_
-|_| |_||_|   \_/  \__, |\___/ \__\___|_| |_| \__\___|_|\__|
-                  |___/     AutoDL 抢卡助手 v%s
+BANNER = """\
+============================================================
+  AutoDL 抢卡助手 v%s   |   开发者 Token 直连，不开浏览器
+  查库存 -> 匹配 -> 下单 -> 开机 -> 核对 -> 通知
+============================================================
 """
 
 
@@ -89,6 +86,16 @@ def _make_client(args: argparse.Namespace, token: str) -> AutoDLClient:
         max_retries=args.http_retries,
     )
     return AutoDLClient(http)
+
+
+@contextmanager
+def _open_client(args: argparse.Namespace, token: str | None = None) -> Iterator[AutoDLClient]:
+    """建一个客户端，用完把长连接关掉（避免测试/脚本里一堆未关闭的 socket）。"""
+    client = _make_client(args, token if token is not None else _need_token(args))
+    try:
+        yield client
+    finally:
+        client.http.close()
 
 
 def _resolve_spec(args: argparse.Namespace) -> TaskSpec:
@@ -158,8 +165,8 @@ def cmd_login(args: argparse.Namespace) -> int:
     if not token:
         raise ConfigError("Token 不能为空")
 
-    client = _make_client(args, token)
-    balance = client.balance()
+    with _open_client(args, token) as client:
+        balance = client.balance()
     save_token(token, args.token_file)
     _out(
         {
@@ -181,29 +188,30 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     token = ""
     try:
         token = _need_token(args)
-        checks.append({"name": "Token", "ok": True, "detail": "已配置"})
+        detail = "命令行 --token" if (args.token or "").strip() else describe_storage()
+        checks.append({"name": "Token", "ok": True, "detail": detail})
     except ConfigError as exc:
         checks.append({"name": "Token", "ok": False, "detail": str(exc)})
         report["ok"] = False
 
     if token:
-        client = _make_client(args, token)
-        try:
-            balance = client.balance()
-            checks.append(
-                {"name": "余额接口", "ok": True, "detail": f"余额 ¥{balance.assets:.3f}"}
-            )
-        except AutoDLError as exc:
-            checks.append({"name": "余额接口", "ok": False, "detail": str(exc)})
-            report["ok"] = False
-        try:
-            offers = client.search_machines(page_size=5)
-            checks.append(
-                {"name": "库存接口", "ok": True, "detail": f"取到 {len(offers)} 条报价"}
-            )
-        except AutoDLError as exc:
-            checks.append({"name": "库存接口", "ok": False, "detail": str(exc)})
-            report["ok"] = False
+        with _open_client(args, token) as client:
+            try:
+                balance = client.balance()
+                checks.append(
+                    {"name": "余额接口", "ok": True, "detail": f"余额 ¥{balance.assets:.3f}"}
+                )
+            except AutoDLError as exc:
+                checks.append({"name": "余额接口", "ok": False, "detail": str(exc)})
+                report["ok"] = False
+            try:
+                offers = client.search_machines(page_size=5)
+                checks.append(
+                    {"name": "库存接口", "ok": True, "detail": f"取到 {len(offers)} 条报价"}
+                )
+            except AutoDLError as exc:
+                checks.append({"name": "库存接口", "ok": False, "detail": str(exc)})
+                report["ok"] = False
 
     journal = Journal()
     report["journal"] = journal.summary()
@@ -225,8 +233,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_balance(args: argparse.Namespace) -> int:
-    client = _make_client(args, _need_token(args))
-    balance = client.balance()
+    with _open_client(args) as client:
+        balance = client.balance()
     if args.json:
         _out({"ok": True, **balance.to_dict()}, True)
     else:
@@ -236,10 +244,10 @@ def cmd_balance(args: argparse.Namespace) -> int:
 
 def cmd_stock(args: argparse.Namespace) -> int:
     spec = _resolve_spec(args)
-    client = _make_client(args, _need_token(args))
-    offers = client.search_machines(
-        regions=spec.normalized_regions(), page_size=args.page_size
-    )
+    with _open_client(args) as client:
+        offers = client.search_machines(
+            regions=spec.normalized_regions(), page_size=args.page_size
+        )
     if args.json:
         payload = {
             "ok": True,
@@ -263,8 +271,8 @@ def cmd_stock(args: argparse.Namespace) -> int:
 
 
 def cmd_instances(args: argparse.Namespace) -> int:
-    client = _make_client(args, _need_token(args))
-    instances = client.list_instances()
+    with _open_client(args) as client:
+        instances = client.list_instances()
     if args.json:
         _out(
             {"ok": True, "instances": [i.to_dict() for i in instances]},
@@ -282,6 +290,23 @@ def cmd_instances(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _outcome_exit(outcome: WatchOutcome) -> int:
+    """把一轮结果翻译成退出码（Agent 靠这个分支）。"""
+    if outcome.status in ("created", "confirmed", "observed"):
+        return EXIT_OK
+    if outcome.status in ("no_match", "timeout"):
+        return EXIT_NO_MATCH
+    if outcome.status == "ambiguous":
+        return EXIT_AMBIGUOUS
+    if outcome.status == "error":
+        if outcome.error_code == AuthError.code:
+            return EXIT_AUTH
+        if outcome.error_code == NetworkError.code:
+            return EXIT_NETWORK
+        return EXIT_BUSINESS
+    return EXIT_OK
+
+
 def _run_watcher(args: argparse.Namespace, *, once: bool) -> int:
     spec = _resolve_spec(args)
     if not args.skip_validate:
@@ -292,22 +317,16 @@ def _run_watcher(args: argparse.Namespace, *, once: bool) -> int:
         spec.notify.desktop = False
     client = _make_client(args, _need_token(args))
     watcher = Watcher(client, spec, journal=Journal(args.journal))
-    outcome = watcher.run(once=once)
+    try:
+        outcome = watcher.run(once=once)
+    finally:
+        watcher.close()
+        client.http.close()
     if args.json:
         _out(outcome.to_dict(), True)
     else:
         print(outcome.message or outcome.status)
-    if outcome.status in ("created", "confirmed"):
-        return EXIT_OK
-    if outcome.status == "observed":
-        return EXIT_OK
-    if outcome.status == "no_match":
-        return EXIT_NO_MATCH
-    if outcome.status == "ambiguous":
-        return EXIT_AMBIGUOUS
-    if outcome.status == "error":
-        return EXIT_BUSINESS
-    return EXIT_OK
+    return _outcome_exit(outcome)
 
 
 def cmd_grab(args: argparse.Namespace) -> int:
@@ -321,19 +340,26 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
 
 def cmd_power(args: argparse.Namespace) -> int:
-    client = _make_client(args, _need_token(args))
-    if args.action == "on":
-        client.power_on(args.instance_uuid)
-    elif args.action == "off":
-        client.power_off(args.instance_uuid)
-    else:
-        client.release_instance(args.instance_uuid)
+    with _open_client(args) as client:
+        if args.action == "on":
+            client.power_on(args.instance_uuid)
+        elif args.action == "off":
+            client.power_off(args.instance_uuid)
+        else:
+            client.release_instance(args.instance_uuid)
     _out({"ok": True, "instance_uuid": args.instance_uuid, "action": args.action}, args.json)
     return EXIT_OK
 
 
 def cmd_journal(args: argparse.Namespace) -> int:
     journal = Journal(args.journal)
+    if args.ack:
+        count = journal.ack_pending()
+        if args.json:
+            _out({"ok": True, "acked": count, "path": str(journal.path)}, True)
+        else:
+            print(f"已为 {count} 条未收尾记录补上「人工核对完成」，现在可以继续下单了。")
+        return EXIT_OK
     records = journal.read_all()
     if args.json:
         _out({"ok": True, "summary": journal.summary(), "records": records}, True)
@@ -386,8 +412,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--token", help="AutoDL 开发者 Token（优先于本地保存的）")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出（给 Agent 用）")
     parser.add_argument("--base-url", default="https://api.autodl.com", help="AutoDL API 根地址")
-    parser.add_argument("--http-timeout", type=float, default=15.0, help="单次请求超时（秒）")
-    parser.add_argument("--http-retries", type=int, default=3, help="网络错误的重试次数")
+    parser.add_argument("--http-timeout", type=float, default=10.0, help="单次请求超时（秒）")
+    parser.add_argument("--http-retries", type=int, default=2, help="网络错误的重试次数")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -408,7 +434,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_stock = sub.add_parser("stock", help="查询一次库存")
     p_stock.add_argument("--regions", nargs="*", help="地区（官方代码或中文名）")
     p_stock.add_argument("--page-size", type=int, default=90)
-    p_stock.add_argument("--timestamp", type=int, default=0, help="（JSON 输出里的检查时间戳）")
     p_stock.set_defaults(func=cmd_stock)
 
     # ---- instances
@@ -425,6 +450,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_journal = sub.add_parser("journal", help="查看意图日志")
     p_journal.add_argument("--journal", help="日志路径")
     p_journal.add_argument("--limit", type=int, default=20)
+    p_journal.add_argument(
+        "--ack", action="store_true", help="人工核对后收尾：解除「结果不明」对下单的阻塞"
+    )
     p_journal.set_defaults(func=cmd_journal)
 
     # ---- config
@@ -475,7 +503,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if not args.json and getattr(args, "command", "") not in ("login",):
-        print(BANNER % __version__)
+        # 横幅走 stderr：stdout 留给结果，方便管道和 Agent 直接读。
+        print(BANNER % __version__, file=sys.stderr, end="")
 
     try:
         return args.func(args)

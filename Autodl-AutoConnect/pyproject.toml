@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autodl-autoconnect"
-version = "1.0.0"
+version = "1.1.0"
 description = "拿 AutoDL 开发者 Token 直接抢空闲 GPU 实例的 CLI 工具，可被 Agent 接管。"
 readme = "README.md"
 requires-python = ">=3.9"

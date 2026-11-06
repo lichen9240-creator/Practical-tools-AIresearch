@@ -115,8 +115,8 @@ class TaskSpec:
     paid_consent: bool = False
     """**默认 False**：只发现库存就通知，不真的下单。改成 True 才会创建实例。"""
 
-    poll_seconds: float = 3.0
-    """轮询间隔（秒）。"""
+    poll_seconds: float = 2.0
+    """轮询间隔（秒）。实际间隔会加 ±15% 抖动，避免和一堆脚本同秒撞车。"""
 
     timeout_minutes: float = 0.0
     """最长监测时长（分钟），0 表示不限。"""
@@ -144,6 +144,8 @@ class TaskSpec:
             raise ConfigError("max_price_hourly 必须大于 0")
         if self.balance_reserve < 0:
             raise ConfigError("balance_reserve 不能为负")
+        if self.cooldown_seconds < 0:
+            raise ConfigError("cooldown_seconds 不能为负")
         if self.gpu_model_regex:
             import re
 

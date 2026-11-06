@@ -149,6 +149,24 @@ class Journal:
                 pending.append(record)
         return pending
 
+    def ack_pending(self, *, note: str = "人工核对后收尾（journal --ack）") -> int:
+        """给所有「未收尾的意图」补一条 result 记录，解除对下单的阻塞。
+
+        只应在**人工确认过 AutoDL 控制台的实例列表**之后使用：
+        这个动作不会去查接口，只是把「我知道结果了」写进日志。
+        """
+        pending = self.pending_intents()
+        for record in pending:
+            self.record(
+                "result",
+                machine_id=record.get("machine_id", ""),
+                instance_uuid=record.get("instance_uuid", ""),
+                status="manual_resolved",
+                message=note,
+                extra={"acked_intent_ts": record.get("ts")},
+            )
+        return len(pending)
+
     def summary(self) -> dict:
         """给 ``status`` / ``doctor`` 用的统计。"""
         records = self.read_all()

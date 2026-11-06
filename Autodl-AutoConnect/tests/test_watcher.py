@@ -27,6 +27,7 @@ class WatcherTestBase(unittest.TestCase):
         self.journal = Journal(Path(self._dir.name) / "journal.jsonl")
         self.notifications: list[tuple[str, str]] = []
         self.webhooks: list[dict] = []
+        self._watchers: list[Watcher] = []
         self.notifier = Notifier(
             NotifyConfig(webhook_url="http://example.invalid/hook", desktop=False),
             http_post=self._fake_post,
@@ -42,6 +43,9 @@ class WatcherTestBase(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        for watcher in self._watchers:
+            watcher.close()
+        self.client.http.close()
         self.fake.__exit__(None, None, None)
         self._dir.cleanup()
 
@@ -53,13 +57,15 @@ class WatcherTestBase(unittest.TestCase):
         return 200, '{"code":"Success"}'
 
     def make_watcher(self, spec: TaskSpec | None = None) -> Watcher:
-        return Watcher(
+        watcher = Watcher(
             self.client,
             spec or self.spec,
             journal=self.journal,
             notifier=self.notifier,
             sleep=lambda _: None,
         )
+        self._watchers.append(watcher)
+        return watcher
 
 
 class ObserveModeTest(WatcherTestBase):
@@ -146,6 +152,29 @@ class GrabTest(WatcherTestBase):
         outcome = self.make_watcher().check_once()
         self.assertFalse(outcome.matched)
         self.assertEqual(self.fake.state.create_calls, [])
+
+    def test_business_error_on_create_is_definite_failure(self):
+        """服务端明确返回业务错误 = 确定没下成，必须写 result 收尾，不能算「结果不明」。"""
+        self.fake.add_machine(machine_id="m-1")
+        self.fake.state.fail_create_with_code = "NoStock"
+        outcome = self.make_watcher().check_once()
+
+        self.assertEqual(outcome.status, "error")
+        self.assertEqual(outcome.error_code, "NoStock")
+        self.assertEqual(self.journal.pending_intents(), [])
+        kinds = [record["kind"] for record in self.journal.read_all()]
+        self.assertIn("result", kinds)
+
+    def test_balance_notification_is_not_spammy(self):
+        """余额不足只通知一次，不该每个轮询周期都发。"""
+        self.fake.add_machine(machine_id="m-1")
+        self.fake.state.balance_milli = 0
+        self.spec.expected_hours = 10.0
+        watcher = self.make_watcher()
+        watcher.check_once()
+        watcher.check_once()
+        kinds = [w["body"].get("kind") for w in self.webhooks]
+        self.assertEqual(kinds.count("balance_low"), 1)
 
 
 class AmbiguityTest(WatcherTestBase):

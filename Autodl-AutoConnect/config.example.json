@@ -29,12 +29,12 @@
 
   "paid_consent": false,
   "_paid_consent": "★ 默认 false = 只通知不下单。改成 true 才允许真实下单（扣费）。命令行还要再加 --yes。",
-  "poll_seconds": 3.0,
-  "_poll_seconds": "轮询间隔（秒）。",
+  "poll_seconds": 2.0,
+  "_poll_seconds": "轮询间隔（秒）。实际间隔会加 ±15% 抖动；想更激进可以设 1.0。",
   "timeout_minutes": 1440.0,
   "_timeout_minutes": "最长监测时长（分钟），0 表示不限。",
   "cooldown_seconds": 20.0,
-  "_cooldown_seconds": "下单失败后的冷却时间。",
+  "_cooldown_seconds": "下单失败后的冷却时间（秒）。只有下单失败才冷却，网络抖动不会拖慢轮询。",
   "max_attempts": 0,
   "_max_attempts": "最多尝试下单次数，0 表示不限。",
 
