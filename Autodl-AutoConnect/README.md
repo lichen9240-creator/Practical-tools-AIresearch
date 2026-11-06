@@ -423,8 +423,6 @@ OK
 ---
 
 ## 致谢
-
-- [Stop-Manually-Refreshing-AutoDL-GPU](https://github.com/cc2025cheng/Stop-Manually-Refreshing-AutoDL-GPU) —— 同一个问题的开源解答，本项目的产品思路受其启发。
 - [AutoDL 官方文档](https://www.autodl.com/docs/common_api/) —— 开发者 API 与地区代码表。
 - 本项目与 AutoDL 官方无隶属关系。
 
