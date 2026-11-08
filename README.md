@@ -1,45 +1,74 @@
-# Practical-tools-AIresearch
+<div align="center">
 
-[English](README.en.md) | **简体中文**
+# 🧰 Practical Tools for AI Research
 
-做 AI 研究过程中攒下来的一些实用小工具。每个工具一个独立目录，
-互不依赖，可以单独 clone 出来用。
+*Small tools I built while running experiments — each one removes a specific annoying step.*
 
-| 目录 | 简介 | 技术栈 |
+![Python](https://img.shields.io/badge/python-3.9%2B-blue) ![Tools](https://img.shields.io/badge/tools-Autodl--AutoConnect-6f42c1) ![License](https://img.shields.io/badge/license-MIT-green)
+
+<sub><b>English</b> · <a href="README.zh-CN.md">中文</a></sub>
+
+</div>
+
+## 📦 Tools
+
+| Tool | What problem it solves | Status |
 | --- | --- | --- |
-| [`Autodl-AutoConnect/`](Autodl-AutoConnect/) | 用 AutoDL 开发者 Token 直接抢空闲 GPU 实例，可被 Agent 接管；不用浏览器、不用人守页面 | Python（零依赖） |
+| [Autodl-AutoConnect](Autodl-AutoConnect/) | Watches AutoDL for an idle GPU and grabs it with one command — no browser, no manual page-refreshing | 🧪 Beta · v1.1.0 |
 
----
+## ⚡ Autodl-AutoConnect
 
-## Autodl-AutoConnect
-
-AutoDL 的热门卡常年 0 空闲，页面刷半天，出来的卡几十秒就被租走。
-这个工具把「盯着 AutoDL 等卡」变成一条命令：
+AutoDL's popular GPUs sit at zero idle capacity most of the day: you refresh for half an hour, a card appears, and it is gone before you can click. Autodl-AutoConnect watches AutoDL for an idle GPU and grabs it with one command. It calls AutoDL's own endpoints with your developer token, so there is no browser, password, or captcha flow.
 
 ```bash
-# 只通知，不下单（默认不花钱）
-autodl-ac watch --gpu-models "RTX 4090" --regions 西北B区
+# Save the developer token once (AutoDL console -> Settings -> Developer Token)
+autodl-ac --token <your-token> login
 
-# 授权下单
-autodl-ac watch --gpu-models "RTX 4090" --regions 西北B区 --yes
+# Notify only — the default, no money is spent
+autodl-ac watch --gpu-models "RTX 4090" --regions westDC2
+
+# Real order, with hard spending guard-rails
+autodl-ac watch --gpu-models "RTX 4090" --regions westDC2 \
+  --max-price-hourly 3.0 --expected-hours 4 --max-total-cost 20 \
+  --balance-reserve 5 --yes
 ```
 
-- **不用开浏览器**：直接调用 AutoDL 自己的接口，用开发者 Token 鉴权
-- **Agent 能接管**：每条命令都支持 `--json`，退出码有明确语义
-- **不会重复扣费**：意图日志 + 幂等对账 + 「结果不明绝不重试」
-- **花钱有护栏**：单价上限 / 总预算 / 余额预检，缺一不可
-- **快**：长连接复用（1.1.0 起每个请求省一次 TCP+TLS 握手），
-  下单前只留一个网络往返，轮询 2 秒一次
+**The flags that matter:**
 
-详见 [Autodl-AutoConnect/README.md](Autodl-AutoConnect/README.md)（[English](Autodl-AutoConnect/README.en.md)）。
+- `--gpu-models` — models to match (for example `"RTX 4090"`); `--regions` — one or more AutoDL regions (for example `westDC2`).
+- `--image-uuid` — the official AutoDL image UUID; AutoDL usually rejects orders without one, so set it explicitly.
+- 🛡️ `--max-price-hourly` — per-GPU price ceiling in CNY/hour.
+- 💸 `--expected-hours` + `--max-total-cost` — the estimated total is price × GPUs × expected hours; the order is skipped if it would exceed the cap.
+- 🏦 `--balance-reserve` — available balance must cover the estimated cost plus this reserve.
+- ✋ `--yes` — authorizes a real, paid order for this run. The default config is notify-only; `--no-consent` forces notify-only.
+- 🤖 `--json` — machine-readable output for agent hand-off. It is a **global** option, so it goes before the subcommand:
 
----
+```bash
+autodl-ac --json grab --gpu-models "RTX 4090" --regions westDC2 --yes
+```
 
-## 使用方式
+**Safety by construction:** before ordering, the tool checks whether that machine already hosts one of your instances (idempotent reconciliation), and it journals every order intent. If an order result is ambiguous, it never retries; it reconciles read-only and blocks further ordering until you verify in the console and run `autodl-ac journal --ack`. Exit code `5` means "ambiguous"; `4` means no match or watch timeout.
 
-每个子项目都有自己的 README，直接进对应目录看即可。
-大部分工具不依赖第三方框架，克隆下来就能跑。
+See [Autodl-AutoConnect/README.en.md](Autodl-AutoConnect/README.en.md) for the full command reference ([Chinese](Autodl-AutoConnect/README.md)).
 
-## 许可
+## 🧪 Why these exist
 
-各子项目各自带 LICENSE。
+Most of my experiment time was not lost to thinking. It was lost to waiting — waiting for a GPU to free up, for a token to load, for yet another page refresh. Each tool here removes one of those specific waits, so the loop from "I have an idea" to "the run is going" stays as short as possible.
+
+## 🤝 Using them
+
+- **Python 3.9+**, with **zero runtime dependencies** for Autodl-AutoConnect (standard library only), as declared in [`pyproject.toml`](Autodl-AutoConnect/pyproject.toml).
+- An **AutoDL developer token** is required; get it from the AutoDL console under Settings -> Developer Token.
+- Install the `autodl-ac` command from a clone, or run the package directly:
+
+```bash
+cd Autodl-AutoConnect
+pip install -e .
+autodl-ac --help
+```
+
+Without installing: `python -m autodl_autoconnect --help`. Every sub-project has its own README; start with the directory you need.
+
+## 📄 License
+
+Autodl-AutoConnect is released under the [MIT License](Autodl-AutoConnect/LICENSE). Each sub-project ships its own `LICENSE` file.
